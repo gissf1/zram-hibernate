@@ -1,0 +1,1111 @@
+#!/bin/bash
+# hibernate wrapper:
+# - check for or add disk swap
+# - maybe remove zram
+# - call systemctl hibernate
+# - sleep 5s or so
+# - restore zram if removed
+# - remove/restore disk swap state
+
+TMPFN="/tmp/$( basename "$0" ).tmp"
+
+initTputVars() {
+	# NOTE: look at man 5 terminfo for details on these codes
+	TPUTEL=`tput el`     # clear to EOL
+	TPUTED=`tput ed`     # clear to end-of-screen
+	TPUTSGR0=`tput sgr0` # reset to normal formatting
+	# save codes (no args)
+	for S in dim bold sc rc cud1 cuu1 cub1 cuf1 ; do
+		printf -v "TPUT${S}" '%s' "$( tput $S )"
+	done
+	# colors
+	for C in $( seq 0 7 ) ; do
+		printf -v "TPUTSETAF${C}" '%s' "$( tput setaf $C )"
+		printf -v "TPUTSETAB${C}" '%s' "$( tput setab $C )"
+		printf -v "TPUTSETAB${C}" '%s' "$( tput setab $C )"
+	done
+	# set COLUMNS and LINES variables appropriately
+	if [ -z "$COLUMNS" ]; then
+		tput cols > /dev/null
+	fi
+}
+initTputVars
+
+clearline() {
+	printf "\r$TPUTEL"
+}
+
+cleardown() {
+	printf "\r$TPUTED"
+}
+
+saveCursor() {
+	echo -en "$TPUTsc"
+}
+
+restoreCursor() {
+	echo -en "$TPUTrc"
+}
+
+getCursorYX() {
+	# Returns the text cursor's current row and column (0 indexed)
+    local CURSORX
+    local CURSORY
+	# based on code from https://stackoverflow.com/questions/2575037/how-to-get-the-cursor-position-in-bash
+	# based on a script from http://invisible-island.net/xterm/xterm.faq.html
+	exec < /dev/tty
+	oldstty=$(stty -g)
+	stty raw -echo min 0
+    IFS=';' read -sdR -p $'\E[6n' CURSORY CURSORX
+	stty $oldstty
+	# parse and return data
+    CURSORY="${CURSORY#*[}"
+    CURSORY=$(( CURSORY - 1 ))
+    CURSORX=$(( CURSORX - 1 ))
+    echo "$CURSORY $CURSORX"
+}
+
+setCursorYX() {
+	# moves the text cursor to the specified row and column
+	# $1 row # (0 indexed)
+	# $2 col # (0 indexed)
+	local Y=$1
+	local X=$2
+	tput cup "$Y" "$X"
+}
+
+cursestest() {
+	local C
+	local I
+	local F
+	local B
+	local S
+	echo "basic cursor test..."
+	getCursorYX
+	echo "homing cursor via snake... "
+	local X
+	local Y
+	local D=1
+	read Y X <<<"$( getCursorYX )"
+	echo -n "($X,$Y) "
+	echo -en '@\b'
+	while [ $Y != 0 -o $X != 0 ]; do
+		echo -en ' '
+		(( X += D ))
+		if [ $X -lt 0 -o $X -gt $COLUMNS ]; then
+			(( Y -= 1 ))
+			(( D = 0 - D ))
+			(( X += D ))
+		fi
+		setCursorYX $Y $X
+		echo -en '@\b'
+		sleep 0.002
+	done
+}
+
+getLock() {
+	if [ -e "$TMPFN" ]; then
+		if [ ! -s "$TMPFN" ]; then
+			echo "[$$] FATAL: unable to acquire lock: empty lockfile: $TMPFN" >&2
+			exit 1
+		fi
+		local LOCKPID=$( egrep -m 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
+		if [ -e "/proc/$LOCKPID" ]; then
+			echo "[$$] FATAL: unable to acquire lock: lock busy by pid $LOCKPID: /proc/$LOCKPID" >&2
+			exit 1
+		fi
+		if [ $( ps $LOCKPID | wc -l ) != 1 ]; then
+			echo "[$$] FATAL: unable to acquire lock: lock busy by pid $LOCKPID: ps $LOCKPID" >&2
+			exit 1
+		fi
+		isVerbose 2 && echo "[$$] removing stale lock..."
+		doUnlock
+		getLock
+	else
+		isVerbose 2 && echo "[$$] creating tmpfile..."
+		touch "$TMPFN"
+		sleep 0.1
+		echo "LOCKPID=$$" >> "$TMPFN"
+		sleep 0.1
+		local LOCKPID=$( egrep -m 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
+		if [ "$LOCKPID" != "$$" ]; then
+			echo "[$$] FATAL: unable to acquire lock: owned by another process: $TMPFN" >&2
+			exit 1
+		fi
+		local LOCKPIDS=$( egrep -c "^LOCKPID=" < "$TMPFN" )
+		if [ $LOCKPIDS != 1 ]; then
+			echo "[$$] WARNING: multiple locks attempted: $TMPFN" >&2
+			egrep "^LOCKPID=" < "$TMPFN" | egrep -xv "LOCKPID=$$" | sed -r "s~^LOCKPID=([0-9]+)\$~[$$] - \1~g"
+			sed -ri "s~^LOCKPID=[0-9]+\$~LOCKPID=$$~" "$TMPFN"
+			local LOCKPID=$( egrep -m 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
+			if [ "$LOCKPID" != "$$" ]; then
+				echo "[$$] FATAL: unable to acquire lock: owned by another process: $TMPFN" >&2
+				exit 1
+			fi
+		fi
+		isVerbose 2 && echo "[$$] lock acquired."
+	fi
+}
+
+doUnlock() {
+	if [ -f "$TMPFN" ]; then
+		if [ $VERBOSE -lt 3 ]; then
+			rm -f "$TMPFN"
+		else
+			# with verbosity level 3, don't delete the TMPFN unless we're replacing it immediately
+			local LOCKPID=$( egrep -m 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
+			if [ "$LOCKPID" != "$$" ]; then
+				rm -f "$TMPFN"
+			fi
+		fi
+	fi
+}
+
+table2vars() {
+	local PREFIX=$1
+	sed -r 's/\s+/\t/g' - | awk -F"\t" -vPREFIX="$PREFIX" '
+BEGIN {
+	RECCNT=0
+	FIELDCNT=0
+}
+(FIELDCNT==0) {
+	for(F=1; F<=NF; F++) {
+		#print "FIELD[" F "]=" $F
+		FIELD[F] = $F
+		gsub(/[^0-9A-Z_a-z]/, "", FIELD[F])
+		FIELDCNT += 1
+	}
+	#print "found " FIELDCNT " fields."
+	next
+}
+{
+	for(F=1; F<=FIELDCNT; F++) {
+		if (match($F, /^-?[0-9]+$/)) {
+			QUOTE=""
+		} else if (match($F, /^[-+,.\/0-9:A-Z^_a-z]+$/)) {
+			QUOTE=""
+		} else {
+			QUOTE="\""
+		}
+		print PREFIX "" RECCNT "_" FIELD[F] "=" QUOTE $F QUOTE
+		shift
+	}
+	RECCNT += 1
+}
+END {
+	print PREFIX "S=" RECCNT
+}' -
+	return $?
+}
+
+getMemInfo() {
+	egrep '^(Mem|Swap)(Free|Available|Total|Used):' < /proc/meminfo | sed -r 's~^([^:]+):\s+([0-9]+)( kB)?~\1=\2~'
+	return $?
+}
+
+getCalculatedInfo() {
+	# Ensure essential information is present
+	if [ -z "$SwapTotal" ] || [ $(( SwapTotal +0 )) -lt 1 ]; then
+		echo "FATAL: Unable to determine SwapTotal" >&2
+		return 1
+	fi
+	# Ensure SwapUsed is defined
+	SwapUsed=$(( SwapTotal - SwapFree ))
+	if [ "$SwapUsed" == "" ]; then
+		echo "FATAL: Unable to determine SwapUsed." >&2
+		return 1
+	fi
+	echo "SwapUsed=$SwapUsed"
+	# calculate overcommit
+	if [ $MemAvailable -gt $SwapUsed ]; then
+		MemOvercommit=0
+	else
+		MemOvercommit=$(( SwapUsed - MemAvailable ))
+	fi
+	echo "MemOvercommit=$MemOvercommit"
+	# done
+	return 0
+}
+
+getActiveSwapInfo() {
+	{
+		IFS= read -r HEADER
+		printf '%s\n' "$HEADER"
+		sort -gk 5
+	} < /proc/swaps | table2vars "ACTIVESWAP"
+	return $?
+}
+
+getFstabSwapInfo() {
+	awk "$( cat << FSTABSWAPS
+BEGIN {
+	NUM=0
+}
+/^\\s*[^#]/{
+	# UUID/device mountpoint type options dump pass
+	DEVICE=\$1
+	#MOUNT=\$2
+	TYPE=\$3
+	OPTIONS=\$4
+	#DUMP=\$5
+	#PASS=\$6
+	if (!match(TYPE, /^([Ss][Ww][Aa][Pp]|[Aa][Uu][Tt][Oo])\$/)) {
+		next
+	}
+	#print "-- " DEVICE ": TYPE=" TYPE ", OPTIONS=" OPTIONS
+	if (match(DEVICE, /^[^/]/)) {
+		# lookup device name using blkid -t DEVICE
+		CMD="blkid -t '" DEVICE "' | sed -r 's~^(/[^:]+): ~DEVICE=\"\\\\1\" ~g ; s~\" ([A-Z])~\"\\\\n\\\\1~g'"
+		I = NUM - 1
+		while ((CMD | getline RET) > 0) {
+			if (match(RET, /^DEVICE=/)) {
+				I += 1
+			}
+			print "FSTABSWAP" I "_" RET
+		}
+		close(CMD)
+		while (I >= NUM) {
+			print "FSTABSWAP" NUM "_TYPE=\"" TYPE "\""
+			print "FSTABSWAP" NUM "_OPTIONS=\"" OPTIONS "\""
+			NUM += 1
+		}
+	} else {
+		print "FSTABSWAP" NUM "_DEVICE=\"" DEVICE "\""
+		print "FSTABSWAP" NUM "_TYPE=\"" TYPE "\""
+		print "FSTABSWAP" NUM "_OPTIONS=\"" OPTIONS "\""
+		NUM += 1
+	}
+}
+END {
+	print "FSTABSWAPS=" NUM
+}
+FSTABSWAPS
+	)" < /etc/fstab | sort -u
+	return $?
+}
+
+getResumeInfo() {
+	# parse kernel cmdline to get resume value
+	local KERNEL_RESUME_RAW=$( sed -r 's~^(.+ )?(resume=[^ ]+)( .+)?$~\2~g ; s~^resume=~~g ; t ; d' /proc/cmdline )
+	local RET=$?
+	#echo "getResumeInfo() KERNEL_RESUME_RAW=$KERNEL_RESUME_RAW" >&2
+	local KERNEL_RESUME_DEVICE=$KERNEL_RESUME_RAW
+	if [[ $KERNEL_RESUME_RAW =~ ^.*=.*$ ]]; then
+		KERNEL_RESUME_DEVICE=$( blkid -t "$KERNEL_RESUME_RAW" | sed -r 's~^(/[^:]+): ~DEVICE="\1" ~g ; s~" ([A-Z])~"\n\1~g' | sed -r 's~^DEVICE=~~g ; t REMOVEQUOTES ; d ; : REMOVEQUOTES ; s~^"(.*)"$~\1~g' )
+		#echo "getResumeInfo() KERNEL_RESUME_DEVICE=$KERNEL_RESUME_DEVICE" >&2
+	fi
+	if [ ! -b "$KERNEL_RESUME_DEVICE" ]; then
+		echo "getResumeInfo() Not a valid block device: KERNEL_RESUME_DEVICE=$KERNEL_RESUME_DEVICE" >&2
+	fi
+	if [ $RET == 0 ]; then
+		echo "KERNEL_RESUME_RAW=$KERNEL_RESUME_RAW"
+		echo "KERNEL_RESUME_DEVICE=$KERNEL_RESUME_DEVICE"
+		blkid "$KERNEL_RESUME_DEVICE" | sed -r 's~^(/[^:]+): ~DEVICE="\1" ~g ; s~" ([A-Z])~"\n\1~g' | sed -r 's~^(.*)$~KERNEL_RESUME_\1~g' | egrep -v '^KERNEL_RESUME_DEVICE=|^KERNEL_RESUME_TYPE='
+	fi
+	return $RET
+}
+
+getSwapInfo() {
+	# merge these variables into a single namespace:
+	# - ACTIVESWAP_*
+	# - FSTABSWAP_*
+	# - if no size is present (from activeSwap), determine size of DEVICE and set SWAP_SIZE here, along with setting SWAP_USED=0.
+	(
+		getResumeInfo
+		getActiveSwapInfo
+		getFstabSwapInfo
+	) | awk "$( cat << SWAPVARS
+BEGIN {
+	ACTIVESWAPS=0
+	ACTIVESWAP_KEYS=0
+	FSTABSWAPS=0
+	FSTABSWAP_KEYS=0
+}
+function getDevSize(DEVICE,      CMD,RET) {
+	CMD="sed -r 's~^.*\\\\s+([0-9]+)\\\\s+(\\\\S+)$~/dev/\\\\2\\\\t\\\\1~g ; t ; d' /proc/partitions | egrep '^" DEVICE "\\\\s' | cut -f2"
+	CMD | getline SIZE
+	close(CMD)
+	return SIZE
+}
+function getSwapIndexForDevice(DEVICE,      I) {
+	for(I in SWAP) {
+		if (SWAP[I]["DEVICE"] == DEVICE) {
+			return I
+		}
+	}
+	return ""
+}
+/^KERNEL_RESUME_[A-Z]+=/{
+	if (match(\$0, /^KERNEL_RESUME_([A-Z]+)=(\S+)$/, m)) {
+		if (match(m[2], /^(['"])(.*)(['"])$/, m2) && m2[1] == m2[3]) {
+			m[2]=m2[2]
+		}
+		KERNEL_RESUME[m[1]]=m[2]
+	}
+	next
+}
+/^ACTIVESWAPS=/{
+	if (match(\$0, /^ACTIVESWAPS=([0-9]+)$/, m)) {
+		ACTIVESWAPS=m[1]
+		next
+	}
+}
+/^FSTABSWAPS=/{
+	if (match(\$0, /^FSTABSWAPS=([0-9]+)$/, m)) {
+		FSTABSWAPS=m[1]
+		next
+	}
+}
+/^ACTIVESWAP[0-9]+_/ {
+	if (match(\$0, /^ACTIVESWAP([0-9]+)_([0-9A-Z_a-z]+)=(.*)$/, m)) {
+		ACTIVESWAP[m[1]][m[2]]=m[3]
+		if (ACTIVESWAP_KEY_IDX[m[2]] > "") {
+			ACTIVESWAP_KEY[ACTIVESWAP_KEY_IDX[m[2]]]=m[2]
+		} else {
+			ACTIVESWAP_KEY[ACTIVESWAP_KEYS]=m[2]
+			ACTIVESWAP_KEY_IDX[m[2]]=ACTIVESWAP_KEYS
+			ACTIVESWAP_KEYS+=1
+		}
+		if (m[2] == "Filename") {
+			if (ACTIVESWAP_DEVICE_IDX[m[3]] == "") {
+				ACTIVESWAP_DEVICE_IDX[m[3]]=m[1]
+			}
+		}
+		next
+	}
+}
+/^FSTABSWAP[0-9]+_/ {
+	if (match(\$0, /^FSTABSWAP([0-9]+)_([0-9A-Z_a-z]+)=(.*)$/, m)) {
+		if (match(m[3], /^(['"])(.*)(['"])$/, m3) && m3[1] == m3[3]) {
+			m[3]=m3[2]
+		}
+		FSTABSWAP[m[1]][m[2]]=m[3]
+		if (FSTABSWAP_KEY_IDX[m[2]] > "") {
+			FSTABSWAP_KEY[FSTABSWAP_KEY_IDX[m[2]]]=m[2]
+		} else {
+			FSTABSWAP_KEY[FSTABSWAP_KEYS]=m[2]
+			FSTABSWAP_KEY_IDX[m[2]]=FSTABSWAP_KEYS
+			FSTABSWAP_KEYS+=1
+		}
+		if (m[2] == "DEVICE") {
+			if (FSTABSWAP_DEVICE_IDX[m[3]] == "") {
+				FSTABSWAP_DEVICE_IDX[m[3]]=m[1]
+			}
+		}
+		next
+	}
+}
+{
+	print "UNKNOWN_SWAP_LINE_" NR "=" \$0
+}
+END {
+	SWAPS=0
+	#print "ACTIVESWAP_KEYS:"
+	#for(I=0; I<ACTIVESWAP_KEYS; I++) {
+	#	print "    [" I "]: " ACTIVESWAP_KEY[I]
+	#}
+	#print "FSTABSWAP_KEYS:"
+	#for(I=0; I<FSTABSWAP_KEYS; I++) {
+	#	print "    [" I "]: " FSTABSWAP_KEY[I]
+	#}
+	#print "KERNEL_RESUME data:"
+	ACTIVESWAP_SHIFT=0
+	if (KERNEL_RESUME["DEVICE"] != "") {
+		for(K in KERNEL_RESUME) {
+			V=KERNEL_RESUME[K]
+			if (match(V, /^"(.*)"$/, m)) {
+				V=m[1]
+			}
+			#print "    [" K "]: " V
+			SWAP[0][K]=V
+		}
+		SWAP[0]["IS_RESUME"]=1
+		SWAPS+=1
+		ACTIVESWAP_SHIFT=1
+	}
+	#print "ACTIVESWAPS:"
+	for(I=0; I<ACTIVESWAPS; I++) {
+		#print "    [" I "]: " ACTIVESWAP[I]["Filename"]
+		SWAPIDX=getSwapIndexForDevice(ACTIVESWAP[I]["Filename"])
+		if (SWAPIDX == "") {
+			SWAPIDX=SWAPS
+			SWAPS+=1
+		}
+		SWAP[SWAPIDX]["DEVICE"]=ACTIVESWAP[I]["Filename"]
+		SWAP[SWAPIDX]["ACTIVE"]=1
+		for(K=0; K<ACTIVESWAP_KEYS; K++) {
+			if (ACTIVESWAP_KEY[K] != "Filename") {
+				#print "        [" K "]: " ACTIVESWAP_KEY[K] "=" ACTIVESWAP[I][ACTIVESWAP_KEY[K]]
+				SWAP[SWAPIDX][toupper(ACTIVESWAP_KEY[K])]=ACTIVESWAP[I][ACTIVESWAP_KEY[K]]
+			}
+		}
+	}
+	#print "FSTABSWAPS:"
+	for(I=0; I<FSTABSWAPS; I++) {
+		#print "    [" I "]: " FSTABSWAP[I]["DEVICE"]
+		SWAPIDX=getSwapIndexForDevice(FSTABSWAP[I]["DEVICE"])
+		if (SWAPIDX == "") {
+			SWAPIDX=SWAPS
+			SWAP[SWAPIDX]["DEVICE"]=FSTABSWAP[I]["DEVICE"]
+			SWAP[SWAPIDX]["ACTIVE"]=0
+			SWAPS+=1
+		}
+		#print "         SWAPIDX=" SWAPIDX
+		for(K=0; K<FSTABSWAP_KEYS; K++) {
+			if (FSTABSWAP_KEY[K] == "DEVICE") {
+				# do nothing
+			} else if (FSTABSWAP_KEY[K] == "TYPE") {
+				# do nothing
+			} else if (FSTABSWAP[I][FSTABSWAP_KEY[K]] > "") {
+				#print "        [" K "]: " FSTABSWAP_KEY[K] "=" FSTABSWAP[I][FSTABSWAP_KEY[K]]
+				SWAP[SWAPIDX][toupper(FSTABSWAP_KEY[K])]=FSTABSWAP[I][FSTABSWAP_KEY[K]]
+			}
+		}
+	}
+	# ensure we fill out details for each swap
+	print "SWAPS=" SWAPS
+	#print "SWAPS:"
+	for(I=0; I<SWAPS; I++) {
+		#print "    [" I "]: " SWAP[I]["DEVICE"]
+		if (SWAP[I]["USED"] == "") {
+			SWAP[I]["USED"]=0
+		}
+		if (SWAP[I]["SIZE"] == "") {
+			SWAP[I]["SIZE"]=getDevSize(SWAP[I]["DEVICE"])
+		}
+		if (SWAP[I]["IS_RESUME"] != 1) {
+			SWAP[I]["IS_RESUME"]=0
+		} else {
+			print "KERNEL_RESUME_SWAP_IDX=" I
+		}
+		if (SWAP[I]["ACTIVE"] == "") {
+			SWAP[I]["ACTIVE"]=0
+		}
+		if (SWAP[I]["PRIORITY"] == "") {
+			SWAP[I]["PRIORITY"]=""
+		}
+		# dump out variables for use
+		for(K in SWAP[I]) {
+			print "SWAP" I "_" K "=" SWAP[I][K]
+		}
+	}
+}
+SWAPVARS
+	)" | sort -g
+	return $?
+}
+
+updateVars() {
+	NEWFN="$TMPFN.$( date +%Y%m%d.%H%M%S ).$RANDOM"
+	cp -a "$TMPFN" "$NEWFN"
+	while read LINE ; do
+		FILTER=$( sed -r 's~^([0-9A-Z_a-z]*)=.*$~^\1=~' <<<"$LINE" )
+		if [ "$FILTER" == "$LINE" ]; then
+			echo "FATAL: FILTER == LINE; this should never happen unless the regex failed.  LINE=$LINE" >&2
+			exit 1
+		fi
+		egrep -v "$FILTER" "$NEWFN" > "$NEWFN.tmp" \
+		&& echo "$LINE" >> "$NEWFN.tmp" \
+		&& mv "$NEWFN.tmp" "$NEWFN"
+	done
+	mv "$NEWFN" "$TMPFN"
+}
+
+getVars() {
+	getMemInfo | updateVars || return $?
+	getSwapInfo | updateVars || return $?
+	# HACK: DUMP DEBUG INFO
+	#cat "$TMPFN"
+	. "$TMPFN"
+	getCalculatedInfo | updateVars || return $?
+	# HACK: DUMP DEBUG INFO
+	#cat "$TMPFN"
+	. "$TMPFN"
+	return 0
+}
+
+selectObject() {
+	# select a named object with properties and set variables accordingly
+	# $1 object prefix (SWAP, DISK, etc)
+	# $2 object index in array
+	local REGEX_PREFIX="^$1$2_"
+	local REGEX_GREP="$REGEX_PREFIX[0-9A-Z_a-z]+="
+	local PREFIX_REPLACEMENT="$1_"
+	local VARS=$( set | egrep "$REGEX_GREP" | sed -r "s~$REGEX_PREFIX~$PREFIX_REPLACEMENT~g" )
+	local RET=$?
+# 	echo "selectObject($1,$2): VARS=$VARS"
+	export $VARS
+	return $RET
+}
+
+prettyKB() {
+	local KB=$1
+	KB=$(( KB +0 ))
+	if [ -z "$KB" ]; then
+		echo -n "(unable to parse '$KB')"
+	elif egrep -qv '^[0-9]+$' <<<"$KB" ; then
+		echo -n "(invalid integer '$KB')"
+	elif [ $KB -gt 10485760 ]; then
+		echo -n "$(( KB / 1048576 ))G"
+	elif [ $KB -gt 10240 ]; then
+		echo -n "$(( KB / 1024 ))M"
+	else
+		echo -n "${KB}K"
+	fi
+}
+
+status() {
+	echo "[$( date +%T )] Used=$( prettyKB $((SwapUsed + MemTotal - MemAvailable)) ) MemFree=$( prettyKB $MemFree ) SwapUsed=$( prettyKB $SwapUsed )/$( prettyKB $SwapTotal ) Overcommit=$( prettyKB $MemOvercommit )"
+	if [ -n "$SWAPS" ] && [ "$SWAPS" -gt 0 ]; then
+		for I in `seq 0 $(( SWAPS - 1 ))` ; do
+			selectObject SWAP $I
+			local SWAPFN=$( basename "$SWAP_DEVICE" )
+			if [ -n "$SWAPFN" ]; then
+				SWAPPERC=$( awk -vU=$SWAP_USED -vS=$SWAP_SIZE 'BEGIN{printf("%4.1f",100.0*U/S)}' )
+				printf "%13s: %s" "$SWAPFN" "$SWAPPERC% ($( prettyKB $SWAP_USED )/$( prettyKB $SWAP_SIZE )) [$SWAP_PRIORITY]"
+				echo ''
+			fi
+		done
+	fi
+}
+
+statusLoop() {
+	local DONE=0
+	trap "DONE=1" INT TERM
+	# if cursor is at the bottom of the screen, scroll it up
+	local Y
+	local T
+	local C
+	read Y T <<<$( getCursorYX )
+	getVars || return $?
+	C=$(( SWAPS + 3 ))
+	if [ $(( Y + C )) -ge $LINES ]; then
+		# move cursor down C lines then back up C lines
+		T=$C
+		while [ $T -ge 0 ]; do
+			echo ''
+			(( T-- ))
+		done
+		T=$C
+		while [ $T -ge 0 ]; do
+			echo -en "$TPUTcuu1"
+			(( T-- ))
+		done
+	fi
+	# loop while displaying status
+	while [ -t 1 -a $DONE == 0 -a -e "$TMPFN" -a ! -e "/tmp/dienow" ]; do
+		getVars || return $?
+		saveCursor
+		clearline
+		echo ''
+		status
+		restoreCursor
+		sleep 3
+	done
+	cleardown
+}
+
+isVerbose() {
+	if [[ $VERBOSE -ge $1 ]]; then
+		return 0
+	fi
+	return 1
+}
+
+doSwapoff() {
+	echo 16 > /proc/sys/vm/page-cluster && swapoff $*
+	local RET=$?
+	echo 3 > /proc/sys/vm/page-cluster
+	return $RET
+}
+
+doSwapon() {
+	echo 3 > /proc/sys/vm/page-cluster && swapon $*
+	local RET=$?
+	return $RET
+}
+
+doSwapRemoval() {
+	# remove swaps as needed
+	if isVerbose 1 ; then
+		status
+		echo "doSwapRemoval(): Attempting to add/remove swaps..."
+		statusLoop &
+		local CHILDPID=$!
+	fi
+	# remove unnecessary swaps (adjust the next line)
+	doSwapoff $*
+	RET=$?
+	isVerbose 1 && 
+	if isVerbose 1 ; then
+		kill -s SIGTERM $CHILDPID
+		wait -f $CHILDPID
+		echo "doSwapRemoval(): swapoff $* completed [$RET]"
+	elif [ $RET != 0 ]; then
+		echo "doSwapRemoval(): swapoff $* completed [$RET]"
+	fi
+	getVars || echo "doSwapRemoval(): getVars() failed: $?"
+	isVerbose 1 && status
+	return $RET
+}
+
+isDiskSwap() {
+	# returns success if the swap device specified is on persistent storage
+	# $1 device path to test
+	# return 0 = success; device is persistent storage
+	# return 1 = failure; not persistent storage
+	# return 2 = unknown; device status is unknown
+	local DEV_TYPE
+	local DEV_MAJOR
+	local DEV_MINOR
+	read DEV_TYPE DEV_MAJOR DEV_MINOR <<<"$( stat -c '%d	%Hr	%Lr' "$1" )"
+	if [[ $DEV_TYPE != 5 ]]; then
+		echo "Unknown device type: $1: $DEV_TYPE" >&2
+		return 2
+	fi
+	local DRIVER
+	read DRIVER <<<"$( fgrep -x 'Block devices:' -A9999 /proc/devices | sed -r 's/^$//g ; T ; q' | egrep "^ *$DEV_MAJOR " | cut -b 4- )"
+	if [ "$DRIVER" == "zram" ]; then
+		return 1
+	elif [ "$DRIVER" == "sd" ]; then
+		return 0
+	fi
+	echo "Unknown device type: $1: $DEV_MAJOR:$DEV_MINOR $DRIVER" >&2
+	return 2
+}
+
+ensureDiskSwap() {
+	# check for or add disk swap
+	#
+	local RET=0
+	getVars || return $?
+	isVerbose 1 && {
+		echo "ensureDiskSwap(): Initial swap status..."
+		status
+	}
+	# determine which swaps need to be removed
+	local REMOVE_SWAP_IDX_LIST=""
+	local REMOVE_SWAP_SIZE=0
+	local RESTORE_SWAPS=""
+	local REMOVE_SWAPS=""
+	local POSSIBLE_TARGET_SWAP_IDX_LIST=""
+	local NEXT_PRIORITY=0
+	# find volatile swaps (not persistent)
+	for I in `seq 0 $(( SWAPS - 1 ))` ; do
+		selectObject SWAP $I
+		if [ -z "$SWAP_DEVICE" ]; then
+			continue
+		fi
+		if [ "$SWAP_PRIORITY" != "" ]; then
+			if [ "$SWAP_PRIORITY" -ge "$NEXT_PRIORITY" ]; then
+				NEXT_PRIORITY=$(( SWAP_PRIORITY + 1 ))
+			elif [ "$SWAP_PRIORITY" -lt 0 ]; then
+				true
+			else
+				echo "ensureDiskSwap(): Warning: Selected SWAP $I has invalid priority: $SWAP_PRIORITY"
+			fi
+		fi
+		if ! isDiskSwap "$SWAP_DEVICE" ; then
+			# add this index to REMOVE_SWAP_IDX_LIST
+			REMOVE_SWAP_IDX_LIST="$REMOVE_SWAP_IDX_LIST $I"
+			REMOVE_SWAP_SIZE=$(( REMOVE_SWAP_SIZE + SWAP_USED ))
+			REMOVE_SWAPS="$REMOVE_SWAPS $SWAP_DEVICE"
+			# NOTE: required swap info for reattach: DEVICE PRIORITY
+			if [ "$RESTORE_SWAPS" != "" ]; then
+				RESTORE_SWAPS="$RESTORE_SWAPS	"
+			fi
+			RESTORE_SWAPS="$RESTORE_SWAPS$SWAP_PRIORITY:$SWAP_DEVICE"
+		else
+			POSSIBLE_TARGET_SWAP_IDX_LIST="$POSSIBLE_TARGET_SWAP_IDX_LIST $I"
+			if [ "$SWAP_ACTIVE" == 1 ]; then
+				RESTORE_SWAPS="$RESTORE_SWAPS$SWAP_PRIORITY:$SWAP_DEVICE"
+			fi
+		fi
+	done
+	isVerbose 3 && echo "ensureDiskSwap(): REMOVE_SWAP_SIZE=$REMOVE_SWAP_SIZE"
+	# calculate memory needed
+	local MEM_USED=$(( MemTotal - MemAvailable ))
+	local SIZE_NEEDED=$(( SwapUsed + MEM_USED ))
+	isVerbose 3 && echo "ensureDiskSwap(): FULL SIZE_NEEDED=$SIZE_NEEDED"
+	#TODO: find out what conditions are required for compressing hibernation state, and therefore reducing SIZE_NEEDED
+	SIZE_NEEDED=$(( SIZE_NEEDED / 2 ))
+	isVerbose 3 && echo "ensureDiskSwap(): HALF SIZE_NEEDED=$SIZE_NEEDED"
+	
+	# try to use swap referred to by kernel "resume" argument
+	if [ "$KERNEL_RESUME_SWAP_IDX" != "" ]; then
+		selectObject "SWAP" $KERNEL_RESUME_SWAP_IDX
+		if ! isDiskSwap "$SWAP_DEVICE" ; then
+			echo "SWAP $KERNEL_RESUME_SWAP_IDX: $SWAP_DEVICE: is not a disk" >&2
+		elif [ "$SWAP_SIZE" -lt $SIZE_NEEDED ]; then
+			echo "SWAP $KERNEL_RESUME_SWAP_IDX: is invalid size" >&2
+		elif [ "$SWAP_ACTIVE" == "0" -a $(( SWAP_SIZE - SWAP_USED )) -lt $SIZE_NEEDED ]; then
+			echo "SWAP $KERNEL_RESUME_SWAP_IDX: $SWAP_DEVICE: is inactive and too small" >&2
+		else
+			POSSIBLE_TARGET_SWAP_IDX_LIST="$KERNEL_RESUME_SWAP_IDX $( sed -r "s/(^| )$KERNEL_RESUME_SWAP_IDX( |\$)/ /g ; s/^ +| +\$//g" <<<"$POSSIBLE_TARGET_SWAP_IDX_LIST" )"
+		fi
+	fi
+	POSSIBLE_TARGET_SWAP_IDX_LIST=$( sed -r "s/^ +| +\$//g" <<<"$POSSIBLE_TARGET_SWAP_IDX_LIST" )
+	
+	# find ideal target(s) among detected swaps by iterating over $POSSIBLE_TARGET_SWAP_IDX_LIST
+	local ADD_SWAP_IDX_LIST=""
+	local ADD_SWAP_SIZE=0
+	#TODO: maybe replace the following 'if' with a 'while' to add multiple swaps?
+	if [ "$POSSIBLE_TARGET_SWAP_IDX_LIST" != "" -a "$ADD_SWAP_SIZE" -lt "$SIZE_NEEDED" ]; then
+		local SELECTED=-1
+		local SELECTED_SIZE=-1
+		for I in $POSSIBLE_TARGET_SWAP_IDX_LIST ; do
+			selectObject SWAP $I
+			if [ -z "$SWAP_DEVICE" ]; then
+				continue
+			elif [ -z "$SWAP_OPTIONS" ]; then
+				echo "ensureDiskSwap(): Warning: SWAP $I $SWAP_DEVICE has zero length OPTIONS value" >&2
+				continue
+			elif [[ $SWAP_DEVICE =~ ^/dev\(/[^/]*\)*/zram[0-9]+ ]]; then
+				echo "ensureDiskSwap(): SWAP $I $SWAP_DEVICE is a zram device"
+				continue
+			elif [ "$SWAP_SIZE" -lt "$SIZE_NEEDED" ]; then
+				echo "ensureDiskSwap(): SWAP $I $SWAP_DEVICE is too small: $( prettyKB $SWAP_SIZE ) < $( prettyKB $SIZE_NEEDED ))"
+				continue
+			elif [ "$SWAP_SIZE" -lt "$SELECTED_SIZE" ]; then
+				echo "ensureDiskSwap(): SWAP $I $SWAP_DEVICE is too small: $( prettyKB $SWAP_SIZE ) < $( prettyKB $SELECTED_SIZE ))"
+				continue
+			else
+				isVerbose 1 && echo "ensureDiskSwap(): selecting SWAP $I $SWAP_DEVICE [$SWAP_PRIORITY] $( prettyKB $SWAP_SIZE )"
+				SELECTED=$I
+				SELECTED_SIZE=$SWAP_SIZE
+			fi
+		done
+		if [ "$SELECTED" -ge 0 ]; then
+			selectObject SWAP $SELECTED
+			if [ "$SELECTED" != "$KERNEL_RESUME_SWAP_IDX" ]; then
+				echo "ensureDiskSwap(): FATAL: Selected SWAP is not in kernel resume argument." >&2
+				return 1
+			fi
+			ADD_SWAP_IDX_LIST="$ADD_SWAP_IDX_LIST $SELECTED"
+			ADD_SWAP_SIZE=$(( ADD_SWAP_SIZE + SWAP_SIZE ))
+			POSSIBLE_TARGET_SWAP_IDX_LIST=$( sed -r "s/(^| )$SELECTED( |\$)/\\1\\2/g ; s/  +/ /g ; s/^ +| +\$//g" <<<"$POSSIBLE_TARGET_SWAP_IDX_LIST" )
+		fi
+	fi
+	# report fatal condition and abort
+	if [ "$ADD_SWAP_IDX_LIST" == "" ]; then
+		echo "FATAL: no valid swaps found. cannot suspend to disk." >&2
+		return 1
+	fi
+	isVerbose 3 && echo "ADD_SWAP_IDX_LIST=$ADD_SWAP_IDX_LIST"
+	
+	# store swaps to restore later
+	isVerbose 1 && echo "ensureDiskSwap(): Storing current SWAP state..."
+	isVerbose 3 && echo "RESTORE_SWAPS=$RESTORE_SWAPS"
+	echo "RESTORE_SWAPS=$RESTORE_SWAPS" | updateVars || return $?
+	echo "$RESTORE_SWAPS" > "$TMPFN.restoreswaps"
+	
+	# activate the swaps in ADD_SWAP_IDX_LIST
+	for I in $ADD_SWAP_IDX_LIST ; do
+		selectObject SWAP $I
+		if [ "$SWAP_ACTIVE" == 0 ]; then
+			if [ "$SWAP_PRIORITY" == "" ]; then
+				SWAP_PRIORITY=$NEXT_PRIORITY
+			fi
+			isVerbose 1 && echo "ensureDiskSwap(): Activating SWAP $I: $SWAP_DEVICE [$SWAP_PRIORITY]"
+			if [[ $DRYRUN == 0 ]]; then
+				isVerbose 2 && echo "ensureDiskSwap(): executing: swapon -p '$SWAP_PRIORITY' '$SWAP_DEVICE'"
+				doSwapon -p "$SWAP_PRIORITY" "$SWAP_DEVICE" || return $?
+			else
+				echo "ensureDiskSwap(): DRYRUN: would call: swapon -p '$SWAP_PRIORITY' '$SWAP_DEVICE'"
+			fi
+		else
+			echo "ensureDiskSwap(): Warning: SWAP $I was already active." >&2
+		fi
+	done
+	
+	isVerbose 1 && echo "ensureDiskSwap(): Preparing to remove SWAP entries..."
+	if [[ $DRYRUN == 0 ]]; then
+		isVerbose 2 && echo "ensureDiskSwap(): executing: doSwapRemoval $REMOVE_SWAPS"
+		doSwapRemoval $REMOVE_SWAPS || return $?
+	else
+		echo "ensureDiskSwap(): DRYRUN: would call: doSwapRemoval $REMOVE_SWAPS"
+	fi
+	
+	getVars || return $?
+	isVerbose 1 && {
+		echo "ensureDiskSwap(): final status:"
+		status
+	}
+	return 0
+}
+
+doHibernate() {
+	# call systemctl hibernate and sleep a few seconds
+	#
+	# validate systemctl binary
+	local SYSTEMCTL=$( which systemctl 2> /dev/null )
+	local CMD=$( basename $0 )
+	if [ -z "$SYSTEMCTL" ]; then
+		echo "ERROR: unable to find systemctl binary" >&2
+		exit 1
+	elif [ ! -x "$SYSTEMCTL" ]; then
+		echo "ERROR: unable to execute systemctl binary: $SYSTEMCTL" >&2
+		exit 1
+	fi
+	# validate systemctl subcommand
+	local CNT
+	local RET
+	CNT=$( $SYSTEMCTL --help | egrep "^  $CMD " | wc -l )
+	RET=$?
+	if [ $RET != 0 ]; then
+		echo "ERROR: could not detect systemctl support for subcommand '$CMD'" >&2
+		exit 1
+	elif [ $CNT -gt 1 ]; then
+		echo "ERROR: could not detect systemctl support for subcommand '$CMD'; unknown response returned" >&2
+		exit 1
+	elif [ $CNT != 1 ]; then
+		echo "ERROR: systemctl does not support subcommand '$CMD'" >&2
+		exit 1
+	fi
+	# try to run systemctl subcommand (or dryrun)
+	CMD="$SYSTEMCTL $CMD"
+	if [[ $TEST != 0 ]]; then
+		echo "TEST: would execute: $CMD"
+		RET=0
+	elif [[ $DRYRUN != 0 ]]; then
+		echo "DRYRUN: would execute: $CMD"
+		RET=0
+	else
+		isVerbose 2 && echo "doHibernate(): executing: $CMD"
+		# TODO: uncomment the next line after testing pre/post code is done
+		#$CMD
+		RET=$?
+		if [ $RET != 0 ] || isVerbose 2 ; then
+			echo "doHibernate(): back from: $CMD (exit code=$RET)"
+		fi
+	fi
+	return $RET
+}
+
+restoreSwapState() {
+	# restore initial swap state
+	local NEXT_PRIORITY=0
+	getVars || return $?
+	isVerbose 1 && {
+		echo "restoreSwapState(): Initial swap status..."
+		status
+	}
+	# check if we need to load RESTORE_SWAPS from file
+	if [ "$RESTORE_SWAPS" == "" ]; then
+		# check that restoreswaps file exists
+		if [ ! -f "$TMPFN.restoreswaps" ]; then
+			echo "ERROR: Unable to load SWAP state description: file not found" >&2
+			return 1
+		fi
+		isVerbose 1 && echo "restoreSwapState(): Loading original SWAP state description..."
+		read RESTORE_SWAPS < "$TMPFN.restoreswaps"
+	else
+		isVerbose 1 && echo "restoreSwapState(): Reusing existing SWAP state description..."
+	fi
+	isVerbose 3 && echo "RESTORE_SWAPS=$RESTORE_SWAPS"
+	
+	# process RESTORE_SWAPS to determine how to restore swaps
+	isVerbose 1 && echo "restoreSwapState(): Processing SWAP state description..."
+	local ADD_SWAP_IDX_LIST=""
+	local REMOVE_SWAP_IDX_LIST=""
+	local ADD_SWAPS=""
+	local REMOVE_SWAPS=""
+	local UNKNOWN_PAIRS="$RESTORE_SWAPS"
+	for I in `seq 0 $(( SWAPS - 1 ))` ; do
+		selectObject SWAP $I
+		if [ -z "$SWAP_DEVICE" ]; then
+			continue
+		fi
+		local IN_RESTORE_SWAPS=0
+		local PAIR
+		for PAIR in $UNKNOWN_PAIRS ; do
+			IFS=":" read PAIR_PRIORITY PAIR_DEVICE <<<"$PAIR"
+			isVerbose 3 && echo "restoreSwapState(): parsed PAIR: $PAIR_DEVICE [$PAIR_PRIORITY]"
+			if [ "$SWAP_DEVICE" == "$PAIR_DEVICE" ]; then
+				isVerbose 3 && echo "restoreSwapState(): SWAP $I matches: $SWAP_DEVICE [$SWAP_PRIORITY]"
+				if [ -z "$SWAP_PRIORITY" ]; then
+					local NAME="SWAP${I}_PRIORITY"
+					echo "$NAME=$PAIR_PRIORITY" | updateVars || return $?
+					printf -v "$NAME" '%s' "$PAIR_PRIORITY" || return $?
+					SWAP_PRIORITY="$PAIR_PRIORITY"
+				elif [ "$SWAP_PRIORITY" != "$PAIR_PRIORITY" ]; then
+					echo "restoreSwapState(): ERROR: Priority mismatch: $SWAP_DEVICE ($SWAP_PRIORITY vs $PAIR_PRIORITY)" >&2
+					return 1
+				fi
+				IN_RESTORE_SWAPS=1
+				break
+			fi
+		done
+		if [ "$IN_RESTORE_SWAPS" == 1 ]; then
+			# remove entry from UNKNOWN_PAIRS
+			UNKNOWN_PAIRS=$( sed -r "s~(^|\\t)$PAIR(\\t|\$)~\\1\\2~g ; s~\\t\\t+~\\t~g ; s~^\\t+|\\t+\$~~g" <<<"$UNKNOWN_PAIRS" )
+			if [ "$SWAP_ACTIVE" == 0 ]; then
+				# add to ADD_SWAPS
+				ADD_SWAP_IDX_LIST="$ADD_SWAP_IDX_LIST $I"
+				ADD_SWAPS="$ADD_SWAPS $SWAP_DEVICE"
+			fi
+		else
+			if [ "$SWAP_ACTIVE" == 1 ]; then
+				# add to REMOVE_SWAPS
+				REMOVE_SWAP_IDX_LIST="$REMOVE_SWAP_IDX_LIST $I"
+				REMOVE_SWAPS="$REMOVE_SWAPS $SWAP_DEVICE"
+			fi
+		fi
+	done
+	# cleanup spacing
+	ADD_SWAPS=$( sed -r "s/  +/ /g ; s/^ +| +\$//g" <<<"$ADD_SWAPS" )
+	REMOVE_SWAPS=$( sed -r "s/  +/ /g ; s/^ +| +\$//g" <<<"$REMOVE_SWAPS" )
+	isVerbose 3 && {
+		echo "ADD_SWAPS=$ADD_SWAPS"
+		echo "REMOVE_SWAPS=$REMOVE_SWAPS"
+	}
+	
+	isVerbose 1 && echo "restoreSwapState(): Activating original SWAP devices..."
+	for I in $ADD_SWAP_IDX_LIST ; do
+		selectObject SWAP $I
+		if [ "$SWAP_PRIORITY" == "" ]; then
+			SWAP_PRIORITY=$NEXT_PRIORITY
+			#TODO: finish this code...
+			echo "TODO: finish this code... LINE=$LINENO"
+			return 1
+		fi
+		isVerbose 1 && echo "restoreSwapState(): Activating SWAP $I: $SWAP_DEVICE [$SWAP_PRIORITY]"
+		if [[ $DRYRUN == 0 ]]; then
+			isVerbose 2 && echo "restoreSwapState(): executing: swapon -p '$SWAP_PRIORITY' '$SWAP_DEVICE'"
+			doSwapon -p "$SWAP_PRIORITY" "$SWAP_DEVICE" || return $?
+		else
+			echo "restoreSwapState(): DRYRUN: would call: swapon -p '$SWAP_PRIORITY' '$SWAP_DEVICE'"
+		fi
+	done
+	
+	if [ "$REMOVE_SWAPS" != "" ]; then
+		isVerbose 1 && echo "restoreSwapState(): Removing hibernation SWAP entries..."
+		if [[ $DRYRUN == 0 ]]; then
+			isVerbose 2 && echo "restoreSwapState(): executing: doSwapRemoval $REMOVE_SWAPS"
+			doSwapRemoval $REMOVE_SWAPS || return $?
+		else
+			echo "restoreSwapState(): DRYRUN: would call: doSwapRemoval $REMOVE_SWAPS"
+		fi
+	fi
+
+	getVars || return $?
+	isVerbose 1 && {
+		echo "restoreSwapState(): final status:"
+		status
+	}
+	return 0
+}
+
+pre_main() {
+	getLock
+	ensureDiskSwap || { RET=$? ; doUnlock ; exit $RET ; }
+	doUnlock
+}
+
+post_main() {
+	getLock
+	restoreSwapState || { RET=$? ; doUnlock ; exit $RET ; }
+	doUnlock
+}
+
+main() {
+	local RET
+	getLock
+	# check for or add disk swap
+	ensureDiskSwap || { RET=$? ; doUnlock ; exit $RET ; }
+	# hibernate and sleep 5s or so
+	doHibernate
+	# restore initial swap state
+	restoreSwapState || { RET=$? ; doUnlock ; exit $RET ; }
+	doUnlock
+}
+
+showHelp() {
+	cat <<<"
+usage: $( basename "$0" ) {-h|--help}
+       $( basename "$0" ) [options]
+       - a symlink to this binary placed in /usr/lib/systemd/system-sleep/
+         will execute pre & post system sleep.
+       - naming this script 'hibernate' or 'suspend', or executing via a
+         symlink with these names will wrap around 'sudo' and
+         'systemctl {hibernate|suspend}'
+options:
+       -h --help        show this help text
+       -n --dry-run     show what would be done without making changes
+       -t --test        do everything except actually affect the system power state
+"
+	exit $HELP
+}
+
+if [ $UID != 0 ]; then
+	sudo $0 -- $*
+	exit $?
+fi
+
+HELP=0
+DRYRUN=0
+#TODO: reset TEST default to 0
+TEST=1
+PRE=0
+POST=0
+VERBOSE=0
+ACTION=""
+while [[ $# -gt 0 ]]; do
+	ARG="$1"
+	NEXTARG=""
+	shift
+	while [ -n "$ARG" ]; do
+		case "$ARG" in
+			-h|--help) HELP=1 ;;
+			-n|--dryrun|--dry-run) DRYRUN=1 ;;
+			-t|--test) TEST=1 ;;
+			-v|--verbose) VERBOSE=$(( VERBOSE + 1 )) ;;
+			--cursestest)
+				cursestest
+				exit $?
+				;;
+			pre)  PRE=1  ;;
+			post) POST=1 ;;
+			suspend|hibernate|hybrid-sleep|suspend-then-hibernate)
+				ACTION=$ARG
+				;;
+			# unknown commands
+			-*)
+				if [[ $ARG =~ ^-[A-Za-z][A-Za-z] ]]; then
+					if [ -z "$NEXTARG" ]; then
+						NEXTARG="-${ARG:2}"
+						ARG="${ARG:0:2}"
+					else
+						NEXTARG="-${ARG:2} $NEXTARG"
+						ARG="${ARG:0:2}"
+					fi
+					continue
+				else
+					HELP=1
+					echo "error: invalid argument: $ARG" >&2
+				fi
+				;;
+			*)
+				HELP=1
+				echo "error: invalid argument: $ARG" >&2
+				;;
+		esac
+		ARG="$NEXTARG"
+		NEXTARG=""
+	done
+done
+
+if [ "$PRE$POST$VERBOSE" == "000" ]; then
+	VERBOSE=2
+fi
+if [[ $HELP != 0 ]]; then
+	showHelp
+elif [ "$ACTION" == "suspend" ]; then
+	echo "Nothing to do: No swap needed for pure suspend"
+elif [[ $PRE != 0 ]]; then
+	pre_main
+elif [[ $POST != 0 ]]; then
+	post_main
+else
+	main
+fi
