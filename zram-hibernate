@@ -1048,6 +1048,7 @@ usage: $( basename "$0" ) {-h|--help}
          'systemctl {hibernate|suspend}'
 options:
        -h --help        show this help text
+       -v --verbose     increase output verbosity
        -n --dry-run     show what would be done without making changes
        -t --test        do everything except actually affect the system power state
 "
