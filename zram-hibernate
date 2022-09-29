@@ -853,7 +853,7 @@ doHibernate() {
 	#
 	# validate systemctl binary
 	local SYSTEMCTL=$( which systemctl 2> /dev/null )
-	local CMD=$( basename $0 )
+	local CMD=$1
 	if [ -z "$SYSTEMCTL" ]; then
 		echo "ERROR: unable to find systemctl binary" >&2
 		exit 1
@@ -1028,7 +1028,11 @@ main() {
 	# check for or add disk swap
 	ensureDiskSwap || { RET=$? ; doUnlock ; exit $RET ; }
 	# hibernate and sleep 5s or so
-	doHibernate
+	local CMD=$( basename $0 )
+	if [ "$CMD" == "zram-hibernate" ]; then
+		CMD="hibernate"
+	fi
+	doHibernate $CMD
 	# restore initial swap state
 	restoreSwapState || { RET=$? ; doUnlock ; exit $RET ; }
 	doUnlock
