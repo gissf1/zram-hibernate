@@ -650,7 +650,6 @@ doSwapRemoval() {
 	# remove unnecessary swaps (adjust the next line)
 	doSwapoff $*
 	RET=$?
-	isVerbose 1 && 
 	if isVerbose 1 ; then
 		kill -s SIGTERM $CHILDPID
 		wait -f $CHILDPID
