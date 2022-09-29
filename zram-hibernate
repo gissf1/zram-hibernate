@@ -123,7 +123,7 @@ getLock() {
 			echo "[$$] FATAL: unable to acquire lock: empty lockfile: $TMPFN" >&2
 			exit 1
 		fi
-		local LOCKPID=$( egrep -m 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
+		local LOCKPID=$( grep -Em 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
 		if [ -e "/proc/$LOCKPID" ]; then
 			echo "[$$] FATAL: unable to acquire lock: lock busy by pid $LOCKPID: /proc/$LOCKPID" >&2
 			exit 1
@@ -141,17 +141,17 @@ getLock() {
 		sleep 0.1
 		echo "LOCKPID=$$" >> "$TMPFN"
 		sleep 0.1
-		local LOCKPID=$( egrep -m 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
+		local LOCKPID=$( grep -Em 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
 		if [ "$LOCKPID" != "$$" ]; then
 			echo "[$$] FATAL: unable to acquire lock: owned by another process: $TMPFN" >&2
 			exit 1
 		fi
-		local LOCKPIDS=$( egrep -c "^LOCKPID=" < "$TMPFN" )
+		local LOCKPIDS=$( grep -Ec "^LOCKPID=" < "$TMPFN" )
 		if [ $LOCKPIDS != 1 ]; then
 			echo "[$$] WARNING: multiple locks attempted: $TMPFN" >&2
-			egrep "^LOCKPID=" < "$TMPFN" | egrep -xv "LOCKPID=$$" | sed -r "s~^LOCKPID=([0-9]+)\$~[$$] - \1~g"
+			grep -E "^LOCKPID=" < "$TMPFN" | grep -Exv "LOCKPID=$$" | sed -r "s~^LOCKPID=([0-9]+)\$~[$$] - \1~g"
 			sed -ri "s~^LOCKPID=[0-9]+\$~LOCKPID=$$~" "$TMPFN"
-			local LOCKPID=$( egrep -m 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
+			local LOCKPID=$( grep -Em 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
 			if [ "$LOCKPID" != "$$" ]; then
 				echo "[$$] FATAL: unable to acquire lock: owned by another process: $TMPFN" >&2
 				exit 1
@@ -167,7 +167,7 @@ doUnlock() {
 			rm -f "$TMPFN"
 		else
 			# with verbosity level 3, don't delete the TMPFN unless we're replacing it immediately
-			local LOCKPID=$( egrep -m 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
+			local LOCKPID=$( grep -Em 1 "^LOCKPID=" < "$TMPFN" | sed -r 's/^LOCKPID=//g' )
 			if [ "$LOCKPID" != "$$" ]; then
 				rm -f "$TMPFN"
 			fi
@@ -213,7 +213,7 @@ END {
 }
 
 getMemInfo() {
-	egrep '^(Mem|Swap)(Free|Available|Total|Used):' < /proc/meminfo | sed -r 's~^([^:]+):\s+([0-9]+)( kB)?~\1=\2~'
+	grep -E '^(Mem|Swap)(Free|Available|Total|Used):' < /proc/meminfo | sed -r 's~^([^:]+):\s+([0-9]+)( kB)?~\1=\2~'
 	return $?
 }
 
@@ -314,7 +314,7 @@ getResumeInfo() {
 	if [ $RET == 0 ]; then
 		echo "KERNEL_RESUME_RAW=$KERNEL_RESUME_RAW"
 		echo "KERNEL_RESUME_DEVICE=$KERNEL_RESUME_DEVICE"
-		blkid "$KERNEL_RESUME_DEVICE" | sed -r 's~^(/[^:]+): ~DEVICE="\1" ~g ; s~" ([A-Z])~"\n\1~g' | sed -r 's~^(.*)$~KERNEL_RESUME_\1~g' | egrep -v '^KERNEL_RESUME_DEVICE=|^KERNEL_RESUME_TYPE='
+		blkid "$KERNEL_RESUME_DEVICE" | sed -r 's~^(/[^:]+): ~DEVICE="\1" ~g ; s~" ([A-Z])~"\n\1~g' | sed -r 's~^(.*)$~KERNEL_RESUME_\1~g' | grep -Ev '^KERNEL_RESUME_DEVICE=|^KERNEL_RESUME_TYPE='
 	fi
 	return $RET
 }
@@ -336,7 +336,7 @@ BEGIN {
 	FSTABSWAP_KEYS=0
 }
 function getDevSize(DEVICE,      CMD,RET) {
-	CMD="sed -r 's~^.*\\\\s+([0-9]+)\\\\s+(\\\\S+)$~/dev/\\\\2\\\\t\\\\1~g ; t ; d' /proc/partitions | egrep '^" DEVICE "\\\\s' | cut -f2"
+	CMD="sed -r 's~^.*\\\\s+([0-9]+)\\\\s+(\\\\S+)$~/dev/\\\\2\\\\t\\\\1~g ; t ; d' /proc/partitions | grep -E '^" DEVICE "\\\\s' | cut -f2"
 	CMD | getline SIZE
 	close(CMD)
 	return SIZE
@@ -518,7 +518,7 @@ updateVars() {
 			echo "FATAL: FILTER == LINE; this should never happen unless the regex failed.  LINE=$LINE" >&2
 			exit 1
 		fi
-		egrep -v "$FILTER" "$NEWFN" > "$NEWFN.tmp" \
+		grep -Ev "$FILTER" "$NEWFN" > "$NEWFN.tmp" \
 		&& echo "$LINE" >> "$NEWFN.tmp" \
 		&& mv "$NEWFN.tmp" "$NEWFN"
 	done
@@ -545,7 +545,7 @@ selectObject() {
 	local REGEX_PREFIX="^$1$2_"
 	local REGEX_GREP="$REGEX_PREFIX[0-9A-Z_a-z]+="
 	local PREFIX_REPLACEMENT="$1_"
-	local VARS=$( set | egrep "$REGEX_GREP" | sed -r "s~$REGEX_PREFIX~$PREFIX_REPLACEMENT~g" )
+	local VARS=$( set | grep -E "$REGEX_GREP" | sed -r "s~$REGEX_PREFIX~$PREFIX_REPLACEMENT~g" )
 	local RET=$?
 # 	echo "selectObject($1,$2): VARS=$VARS"
 	export $VARS
@@ -557,7 +557,7 @@ prettyKB() {
 	KB=$(( KB +0 ))
 	if [ -z "$KB" ]; then
 		echo -n "(unable to parse '$KB')"
-	elif egrep -qv '^[0-9]+$' <<<"$KB" ; then
+	elif grep -Eqv '^[0-9]+$' <<<"$KB" ; then
 		echo -n "(invalid integer '$KB')"
 	elif [ $KB -gt 10485760 ]; then
 		echo -n "$(( KB / 1048576 ))G"
@@ -678,7 +678,7 @@ isDiskSwap() {
 		return 2
 	fi
 	local DRIVER
-	read DRIVER <<<"$( fgrep -x 'Block devices:' -A9999 /proc/devices | sed -r 's/^$//g ; T ; q' | egrep "^ *$DEV_MAJOR " | cut -b 4- )"
+	read DRIVER <<<"$( grep -Fx 'Block devices:' -A9999 /proc/devices | sed -r 's/^$//g ; T ; q' | grep -E "^ *$DEV_MAJOR " | cut -b 4- )"
 	if [ "$DRIVER" == "zram" ]; then
 		return 1
 	elif [ "$DRIVER" == "sd" ]; then
@@ -864,7 +864,7 @@ doHibernate() {
 	# validate systemctl subcommand
 	local CNT
 	local RET
-	CNT=$( $SYSTEMCTL --help | egrep "^  $CMD " | wc -l )
+	CNT=$( $SYSTEMCTL --help | grep -E "^  $CMD " | wc -l )
 	RET=$?
 	if [ $RET != 0 ]; then
 		echo "ERROR: could not detect systemctl support for subcommand '$CMD'" >&2
