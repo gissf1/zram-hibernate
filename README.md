@@ -2,6 +2,60 @@
 
 Allows dynamic swap changes to activate disk-based storage as swap for hibernation support when a system typically uses only zram swap during normal operation.
 
+## Linux Hibernation High-Level Summary
+Linux Hibernation has 2 main phases: Shutdown and Resume.
+
+- Shutdown is a matter of pausing applications, storing memory contents and a hibernation signature to disk-based swap, and powering off the system.
+- Resume is similar to a normal system boot process, except that the kernel `resume=` parameter identifies a swap device to attempt to use to restore the system state upon bootup.  When this option is present on boot, the kernel checks the swap device specified by `resume` for the hibernation signature, and if present, it restores the system state from the swap device into memory.  Upon successful restoration, the kernel then clears the hibernation signature from the resume device and resumes execution of the system state as it was previous to Shutdown.
+
+Resume without a hibernation signature (such as after a normal system shutdown) will result in the standard system bootup process - running an instance of init/systemd/openrc as PID 1, etc.
+
+It is highly recommended to use a dedicated swap partition for hibernation.  Swap files are less safe for hibernation as it could trigger race conditions or caching bugs in device drivers, filesystems or kernel cache.
+
+## Principle of Operations / How it works
+
+This script finds and activates a disk-based swap, moves all ZRAM content to the swap device, disables ZRAM, and hibernates the system to the swap device.  Upon resume from hibernation (after the system reboots and the kernel resumes successfully) it restores the original swap configuration, restoring ZRAM, and disabling any disk swap it added for during the hibernation/shutdown phase.
+
+Part of this process is detecting where your system wants to store it's hibernation data.  This is primarily done by analyzing your system's kernel command line for the `resume=` parameter.  This is the safest method as your system would need this to resume from hibernation after shutdown anyhow.  Assuming this is not present, however, the system can use /etc/fstab swap entries for more obscure configurations.
+
+This script also detects if existing swap devices are already active and simply uses them if it believes there is already enough swap to contain your hibernation data.  In this case, it would also keep them active after resume, since that was the original state.
+
+## Usage
+
+zram-hibernate supports a number of arguments that affect its operation and provide troubleshooting information:
+
+```
+-h --help        show help text
+-n --dry-run     show what would be done without making changes
+-t --test        do everything except actually affect the system power state
+-v --verbose     increase output verbosity
+```
+
+To safely test swap detection and operation before system-wide installation you can simply call:
+
+```
+zram-hibernate -tn
+```
+
+System-wide installation is performed by hooking into systemd's hibernation callback, placing the script or a symlink to it in `/usr/lib/systemd/system-sleep/`.
+
+Normal usage is generally transparent after installation by executing a system power command like:
+
+```
+systemctl hibernate
+```
+
+To manually invoke hibernation without systemwide installation you can also call:
+
+```
+zram-hibernate
+```
+
+Verbosity defaults to level 2 when running manually, and 0 when called by systemctl.
+
+---
+Background reference information for the extremely curious follows...
+
 Information about integration with systemd:
 
 https://blog.christophersmart.com/2016/05/11/running-scripts-before-and-after-suspend-with-systemd/
