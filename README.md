@@ -2,6 +2,12 @@
 
 Allows dynamic swap changes to activate disk-based storage as swap for hibernation support when a system typically uses only zram swap during normal operation.
 
+Some applications keep growing until they fill RAM and swap (Google Chrome is a great example).  This can significantly slow down a system by "swapping it to a crawl" - filling memory and swap to the point that the system isn't doing anything but swapping.
+
+To avoid this problem entirely, one can simply disable swap so it can't slow down the system, but then virtual memory isn't available for the application to use during normal operation either.  Using ZRAM instead of a swap disk is a great alternative since it doesn't have as much of a negative performance impact.  A system with ZRAM, however, cannot hibernate to disk, which is a significant portability limitation for systems with a short battery life, no battery at all, or broken/missing suspend/standby functionality.
+
+That is why I created this tool - to allow one to use ZRAM during normal operation for reasonable virtual memory expansion, while also reasonably constraining application memory use, but also allowing the system to activate disk swap when needed for hibernation.
+
 ## Linux Hibernation High-Level Summary
 Linux Hibernation has 2 main phases: Shutdown and Resume.
 
