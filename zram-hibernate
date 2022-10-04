@@ -810,8 +810,8 @@ ensureDiskSwap() {
 	
 	# store swaps to restore later
 	isVerbose 1 && echo "ensureDiskSwap(): Storing current SWAP state..."
-	isVerbose 3 && echo "RESTORE_SWAPS=$RESTORE_SWAPS"
-	echo "RESTORE_SWAPS=$RESTORE_SWAPS" | updateVars || return $?
+	isVerbose 3 && echo "RESTORE_SWAPS=\"$RESTORE_SWAPS\""
+	echo "RESTORE_SWAPS=\"$RESTORE_SWAPS\"" | updateVars || return $?
 	echo "$RESTORE_SWAPS" > "$TMPFN.restoreswaps"
 	
 	# activate the swaps in ADD_SWAP_IDX_LIST
