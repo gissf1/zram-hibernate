@@ -310,13 +310,37 @@ getResumeInfo() {
 	fi
 	if [ ! -b "$KERNEL_RESUME_DEVICE" ]; then
 		echo "getResumeInfo() Not a valid block device: KERNEL_RESUME_DEVICE=$KERNEL_RESUME_DEVICE" >&2
+		RET=128
+	fi
+	# parse kernel cmdline to get resume_offset
+	local KERNEL_RESUME_OFFSET_RAW=$( sed -r 's~^(.+ )?(resume_offset=[^ ]+)( .+)?$~\2~g ; s~^resume_offset=~~g ; t ; d' /proc/cmdline )
+	# <(cat /proc/cmdline <(echo -n ' resume_offset=6051767' ) | tr -d "\n" )
+	local ORET=$?
+	local KERNEL_RESUME_OFFSET=$KERNEL_RESUME_OFFSET_RAW
+	if [ "$KERNEL_RESUME_OFFSET_RAW" == "" ]; then
+		#echo "getResumeInfo():$LINENO KERNEL_RESUME_OFFSET=$KERNEL_RESUME_OFFSET" >&2
+		true
+	elif [[ $KERNEL_RESUME_OFFSET_RAW =~ ^[0-9]+$ ]]; then
+		#echo "getResumeInfo():$LINENO KERNEL_RESUME_OFFSET=$KERNEL_RESUME_OFFSET" >&2
+		true
+		# TODO: find KERNEL_RESUME_REAL_DEVICE
+	else
+		echo "getResumeInfo():$LINENO Not a valid offset: KERNEL_RESUME_OFFSET=$KERNEL_RESUME_OFFSET" >&2
+		if [ $ORET -eq 0 ]; then
+			ORET=128
+		fi
 	fi
 	if [ $RET == 0 ]; then
 		echo "KERNEL_RESUME_RAW=$KERNEL_RESUME_RAW"
 		echo "KERNEL_RESUME_DEVICE=$KERNEL_RESUME_DEVICE"
 		blkid "$KERNEL_RESUME_DEVICE" | sed -r 's~^(/[^:]+): ~DEVICE="\1" ~g ; s~" ([A-Z])~"\n\1~g' | sed -r 's~^(.*)$~KERNEL_RESUME_\1~g' | grep -Ev '^KERNEL_RESUME_DEVICE=|^KERNEL_RESUME_TYPE='
+		if [ $ORET == 0 ]; then
+			echo "KERNEL_RESUME_OFFSET=$KERNEL_RESUME_OFFSET"
+		fi
+		return $ORET
+	else
+		return $RET
 	fi
-	return $RET
 }
 
 getSwapInfo() {
