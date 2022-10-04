@@ -682,6 +682,8 @@ isDiskSwap() {
 		return 1
 	elif [ "$DRIVER" == "sd" ]; then
 		return 0
+	elif [ "$DRIVER" == "blkext" ]; then
+		return 0
 	fi
 	echo "Unknown device type: $1: $DEV_MAJOR:$DEV_MINOR $DRIVER" >&2
 	return 2
