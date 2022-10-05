@@ -32,9 +32,9 @@ zram-hibernate supports a number of arguments that affect its operation and prov
 
 ```
 -h --help        show help text
+-v --verbose     increase output verbosity
 -n --dry-run     show what would be done without making changes
 -t --test        do everything except actually affect the system power state
--v --verbose     increase output verbosity
 -d --debug       debug data parsing logic only
 ```
 
