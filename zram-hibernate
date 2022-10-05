@@ -789,13 +789,14 @@ isDiskSwap() {
 	fi
 	local DRIVER
 	read DRIVER <<<"$( grep -Fx 'Block devices:' -A9999 /proc/devices | sed -r 's/^$//g ; T ; q' | grep -E "^ *$DEV_MAJOR " | cut -b 4- )"
-	if [ "$DRIVER" == "zram" ]; then
-		return 1
-	elif [ "$DRIVER" == "sd" ]; then
-		return 0
-	elif [ "$DRIVER" == "blkext" ]; then
-		return 0
-	fi
+	case "$DRIVER" in
+		zram)
+			return 1
+			;;
+		sd|blkext)
+			return 0
+			;;
+	esac
 	echo "Unknown device type: $1: $DEV_MAJOR:$DEV_MINOR $DRIVER" >&2
 	return 2
 }
