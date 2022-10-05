@@ -299,6 +299,27 @@ FSTABSWAPS
 }
 
 getResumeInfo() {
+	# try to parse configuration file to get resume values
+	if [ -f "/etc/zram-hibernate.conf" ]; then
+		local CONF_FILE="/etc/zram-hibernate.conf"
+		if [ ! -r "$CONF_FILE" ]; then
+			echo "getResumeInfo() Unable to read configuration file: $CONF_FILE: permission denied" >&2
+			return 128
+		fi
+		local KERNEL_RESUME_DEVICE=$( egrep -m1 '^KERNEL_SWAP_DEVICE=' "$CONF_FILE" | cut -d= -f2 | sed -r 's~^(["'"'"'])(.*)\1$~\2~g' )
+		if [ -z "$KERNEL_RESUME_DEVICE" ]; then
+			true
+		elif [ ! -e "$KERNEL_RESUME_DEVICE" ]; then
+			echo "getResumeInfo() manually configured swap device failed: $KERNEL_RESUME_DEVICE: file does not exist.  Please check $CONF_FILE" >&2
+			return 128
+		else
+			echo "KERNEL_RESUME_RAW=$KERNEL_RESUME_DEVICE"
+			echo "KERNEL_RESUME_DEVICE=$KERNEL_RESUME_DEVICE"
+			blkid "$KERNEL_RESUME_DEVICE" | sed -r 's~^(/[^:]+): ~DEVICE="\1" ~g ; s~" ([A-Z])~"\n\1~g' | sed -r 's~^(.*)$~KERNEL_RESUME_\1~g' | grep -Ev '^KERNEL_RESUME_DEVICE=|^KERNEL_RESUME_TYPE='
+			echo "KERNEL_RESUME_CONF='$CONF_FILE'"
+			return 0
+		fi
+	fi
 	# parse kernel cmdline to get resume value
 	local KERNEL_RESUME_RAW=$( sed -r 's~^(.+ )?(resume=[^ ]+)( .+)?$~\2~g ; s~^resume=~~g ; t ; d' /proc/cmdline )
 	local RET=$?

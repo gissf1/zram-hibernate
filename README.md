@@ -60,6 +60,18 @@ zram-hibernate
 
 Verbosity defaults to level 2 when running manually, and 0 when called by systemctl.
 
+If detection fails to work as expected, or you need to manually specify the hibernation device to use, you can create a configuration file `/etc/zram-hibernate.conf` with a line specifying the desired swap device.  The file contents should be similar to the following lines:
+
+```
+KERNEL_SWAP_DEVICE=/dev/mapper/swap-device
+KERNEL_SWAP_DEVICE=/dev/disk/by-label/My_Swap_Disk
+KERNEL_SWAP_DEVICE=/dev/disk/by-uuid/1234567890ABCDE
+KERNEL_SWAP_DEVICE=/swapfile.swp
+KERNEL_SWAP_DEVICE=/swapfile.swp
+```
+
+This file is also necessary if you want to use a swap file or the `resume_offset=` kernel option, as they often mean runtime detection of the `resume=` kernel option will not properly detect the actual resume device.  Note that swap files can have unknown race conditions, and it is recommended to use a dedicated swap partition whenever possible.  If you use the configuration file, be aware that many of the sanity checks done during the detection process are no longer possible, so it's your responsibility to ensure the kernel command line arguments and configuration file contents are correctly configured to work properly.
+
 ---
 Background reference information for the extremely curious follows...
 
