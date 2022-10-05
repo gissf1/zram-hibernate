@@ -734,7 +734,56 @@ isDiskSwap() {
 	local DEV_MAJOR
 	local DEV_MINOR
 	read DEV_TYPE DEV_MAJOR DEV_MINOR <<<"$( stat -c '%d	%Hr	%Lr' "$1" )"
-	if [[ $DEV_TYPE != 5 ]]; then
+	if [[ $DEV_MAJOR == 0 ]] && [[ $DEV_MINOR == 0 ]] && [ -f "$1" ] ; then
+		# Swap file
+		local DEV_MODE
+		local DEV_USER
+		local DEV_GROUP
+		read DEV_MODE DEV_UID DEV_GID <<<"$( stat -c '%a	%u	%g' "$1" )"
+		if [[ $DEV_MODE != 600 ]] && [[ $DEV_MODE != 700 ]] ; then
+			echo "Invalid swap file mode: $1: $DEV_MODE: should be 0600 or 0700" >&2
+			return 2
+		elif [[ $DEV_UID != 0 ]] ; then
+			echo "Invalid swap file owner: $1: $DEV_UID: should be 0/root" >&2
+			return 2
+		elif [[ $DEV_GID != 0 ]] ; then
+			echo "Invalid swap file group: $1: $DEV_GID: should be 0/root" >&2
+			return 2
+		fi
+		# verify that the underlying block device is sane
+		read DEV_FSTYPE DEV_BLKDEV <<<"$( findmnt -no FSTYPE,SOURCE --target "$1" )"
+		case "$DEV_FSTYPE" in
+			ext2|ext3|ext4|xfs|vfat)
+				true
+				;;
+			proc|sysfs|tmpfs|ramfs\
+			|bdev|cgroup|cgroup2|cpuset\
+			|binfmt_misc|hugetlbfs\
+			|devtmpfs|devpts|autofs\
+			|configfs|debugfs|tracefs\
+			|securityfs|mqueue|pstore\
+			|sockfs|bpf|pipefs)
+				echo "swap file on unsupported filesystem: $1: $DEV_FSTYPE" >&2
+				return 1
+				;;
+			fuseblk|fuse|fusectl)
+				echo "FATAL: swap file on FUSE filesystem could be dangerous: $1: $DEV_FSTYPE on $DEV_BLKDEV" >&2
+				return 2
+				;;
+			*)
+				echo "WARNING: swap file on $DEV_FSTYPE filesystem is not well tested and could be dangerous: $1: on $DEV_BLKDEV" >&2
+				echo "         Sleeping for 5 seconds... Press Ctrl+C to abort." >&2
+				sleep 5
+				;;
+		esac
+		if [ -z "$DEV_BLKDEV" ]; then
+			echo "FATAL: swap file on invalid block device: $DEV_BLKDEV / $1" >&2
+			return 2
+		fi
+		echo "Testing underlying block device type: $DEV_BLKDEV" >&2
+		isDiskSwap "$DEV_BLKDEV"
+		return $?
+	elif [[ $DEV_TYPE != 5 ]]; then
 		echo "Unknown device type: $1: $DEV_TYPE" >&2
 		return 2
 	fi
