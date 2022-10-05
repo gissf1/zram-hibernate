@@ -1097,6 +1097,22 @@ restoreSwapState() {
 			return 1
 		fi
 		isVerbose 1 && echo "restoreSwapState(): Activating SWAP $I: $SWAP_DEVICE [$SWAP_PRIORITY]"
+		# report zram changing sizes
+		if [[ $SWAP_DEVICE =~ ^/dev/zram[0-9]+$ ]]; then
+			local CURRENT_SIZE=$( lsblk -bno SIZE "$SWAP_DEVICE" )
+			if [ -z "$CURRENT_SIZE" ]; then
+				CURRENT_SIZE=0
+			fi
+			CURRENT_SIZE=$(( ( CURRENT_SIZE +0 ) / 1024 ))
+			if [ "$CURRENT_SIZE" != "$SWAP_SIZE" ]; then
+				echo "restoreSwapState(): $SWAP_DEVICE size is ${CURRENT_SIZE}K, expecting ${SWAP_SIZE}K" >&2
+				return 1
+			elif [ $CURRENT_SIZE -lt 1024 ]; then
+				echo "restoreSwapState(): $SWAP_DEVICE size is ${CURRENT_SIZE}K, expecting >= 1024K" >&2
+				return 1
+			fi
+		fi
+		# reactivate swap
 		if [[ $DRYRUN == 0 ]]; then
 			isVerbose 2 && echo "restoreSwapState(): executing: swapon -p '$SWAP_PRIORITY' '$SWAP_DEVICE'"
 			doSwapon -p "$SWAP_PRIORITY" "$SWAP_DEVICE" || return $?
