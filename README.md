@@ -35,6 +35,7 @@ zram-hibernate supports a number of arguments that affect its operation and prov
 -n --dry-run     show what would be done without making changes
 -t --test        do everything except actually affect the system power state
 -v --verbose     increase output verbosity
+-d --debug       debug data parsing logic only
 ```
 
 To safely test swap detection and operation before system-wide installation you can simply call:

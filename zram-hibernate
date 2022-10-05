@@ -562,6 +562,23 @@ getVars() {
 	return 0
 }
 
+debugVars() {
+	for F in getMemInfo  getResumeInfo  getActiveSwapInfo  getFstabSwapInfo  getSwapInfo ; do
+		echo " ----- $F() ----------------------------------------"
+		$F || echo "$F() returned: $?"
+	done
+	echo " ---------------------------------------------"
+	if isVerbose 3 ; then
+		getMemInfo | updateVars || return $?
+		getSwapInfo | updateVars || return $?
+		. "$TMPFN"
+		getCalculatedInfo || echo "getCalculatedInfo() returned: $?"
+		# DUMP DEBUG INFO
+		cat "$TMPFN"
+	fi
+	return 0
+}
+
 selectObject() {
 	# select a named object with properties and set variables accordingly
 	# $1 object prefix (SWAP, DISK, etc)
@@ -1047,6 +1064,13 @@ post_main() {
 	doUnlock
 }
 
+debug_main() {
+	local RET
+	getLock
+	debugVars
+	doUnlock
+}
+
 main() {
 	local RET
 	getLock
@@ -1077,6 +1101,7 @@ options:
        -v --verbose     increase output verbosity
        -n --dry-run     show what would be done without making changes
        -t --test        do everything except actually affect the system power state
+       -d --debug       debug data parsing logic only
 "
 	exit $HELP
 }
@@ -1087,6 +1112,7 @@ if [ $UID != 0 ]; then
 fi
 
 HELP=0
+DEBUG=0
 DRYRUN=0
 TEST=0
 PRE=0
@@ -1102,6 +1128,7 @@ while [[ $# -gt 0 ]]; do
 			-h|--help) HELP=1 ;;
 			-n|--dryrun|--dry-run) DRYRUN=1 ;;
 			-t|--test) TEST=1 ;;
+			-d|--debug) DEBUG=1 ;;
 			-v|--verbose) VERBOSE=$(( VERBOSE + 1 )) ;;
 			--cursestest)
 				cursestest
@@ -1143,6 +1170,8 @@ if [ "$PRE$POST$VERBOSE" == "000" ]; then
 fi
 if [[ $HELP != 0 ]]; then
 	showHelp
+elif [[ $DEBUG != 0 ]]; then
+	debug_main
 elif [ "$ACTION" == "suspend" ]; then
 	echo "Nothing to do: No swap needed for pure suspend"
 elif [[ $PRE != 0 ]]; then
