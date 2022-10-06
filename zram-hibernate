@@ -637,7 +637,15 @@ status() {
 			selectObject SWAP $I
 			local SWAPFN=$( basename "$SWAP_DEVICE" )
 			if [ -n "$SWAPFN" ]; then
-				SWAPPERC=$( awk -vU=$SWAP_USED -vS=$SWAP_SIZE 'BEGIN{printf("%4.1f",100.0*U/S)}' )
+				if [ -n "$SWAP_SIZE" ] && [ $(( SWAP_SIZE +0 )) -gt 0 ]; then
+					SWAPPERC=$( awk -vU=$SWAP_USED -vS=$SWAP_SIZE 'BEGIN{printf("%4.1f",100.0*U/S)}' )
+				elif [[ $SWAP_USED -eq 0 ]]; then
+					SWAPPERC=" 0.0"
+				elif [[ $SWAP_USED -ge $SWAP_SIZE ]]; then
+					SWAPPERC=" 100"
+				else
+					SWAPPERC=" (?)"
+				fi
 				printf "%13s: %s" "$SWAPFN" "$SWAPPERC% ($( prettyKB $SWAP_USED )/$( prettyKB $SWAP_SIZE )) [$SWAP_PRIORITY]"
 				echo ''
 			fi
