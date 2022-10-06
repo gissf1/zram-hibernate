@@ -771,6 +771,14 @@ isDiskSwap() {
 				return 2
 				;;
 			*)
+				if [ "$DEV_FSTYPE" == "btrfs" ]; then
+					if [[ $DEV_BLKDEV =~ ^/dev/.*\[/.+\]$ ]]; then
+						echo "Detected btrfs with subvol: $DEV_BLKDEV" >&2
+						IFS="	" read DEV_BLKDEV DEV_BLKDEV_SUBVOL <<<"$( sed -r 's~^(/dev/.*)\[/(.+)\]$~\1\t\2~g' <<<"$DEV_BLKDEV" )"
+						echo "Block device subvol: $DEV_BLKDEV_SUBVOL" >&2
+						echo "Block device: $DEV_BLKDEV" >&2
+					fi
+				fi
 				echo "WARNING: swap file on $DEV_FSTYPE filesystem is not well tested and could be dangerous: $1: on $DEV_BLKDEV" >&2
 				echo "         Sleeping for 5 seconds... Press Ctrl+C to abort." >&2
 				sleep 5
@@ -780,7 +788,7 @@ isDiskSwap() {
 			echo "FATAL: swap file on invalid block device: $DEV_BLKDEV / $1" >&2
 			return 2
 		fi
-		echo "Testing underlying block device type: $DEV_BLKDEV" >&2
+		echo "Testing underlying block device for: $1: $DEV_BLKDEV" >&2
 		isDiskSwap "$DEV_BLKDEV"
 		return $?
 	elif [[ $DEV_TYPE != 5 ]]; then
