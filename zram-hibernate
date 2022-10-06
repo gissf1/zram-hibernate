@@ -306,7 +306,7 @@ getResumeInfo() {
 			echo "getResumeInfo() Unable to read configuration file: $CONF_FILE: permission denied" >&2
 			return 128
 		fi
-		local KERNEL_RESUME_DEVICE=$( egrep -m1 '^KERNEL_SWAP_DEVICE=' "$CONF_FILE" | cut -d= -f2 | sed -r 's~^(["'"'"'])(.*)\1$~\2~g' )
+		local KERNEL_RESUME_DEVICE=$( grep -Em1 '^KERNEL_SWAP_DEVICE=' "$CONF_FILE" | cut -d= -f2 | sed -r 's~^(["'"'"'])(.*)\1$~\2~g' )
 		if [ -z "$KERNEL_RESUME_DEVICE" ]; then
 			true
 		elif [ ! -e "$KERNEL_RESUME_DEVICE" ]; then
