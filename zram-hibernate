@@ -879,7 +879,7 @@ ensureDiskSwap() {
 		selectObject "SWAP" $KERNEL_RESUME_SWAP_IDX
 		if ! isDiskSwap "$SWAP_DEVICE" ; then
 			echo "SWAP $KERNEL_RESUME_SWAP_IDX: $SWAP_DEVICE: is not a disk" >&2
-		elif [ "$SWAP_SIZE" -lt $SIZE_NEEDED ]; then
+		elif [ $(( SWAP_SIZE +0 )) -lt $SIZE_NEEDED ]; then
 			echo "SWAP $KERNEL_RESUME_SWAP_IDX: is invalid size" >&2
 		elif [ "$SWAP_ACTIVE" == "0" -a $(( SWAP_SIZE - SWAP_USED )) -lt $SIZE_NEEDED ]; then
 			echo "SWAP $KERNEL_RESUME_SWAP_IDX: $SWAP_DEVICE: is inactive and too small" >&2
@@ -906,10 +906,10 @@ ensureDiskSwap() {
 			elif [[ $SWAP_DEVICE =~ ^/dev\(/[^/]*\)*/zram[0-9]+ ]]; then
 				echo "ensureDiskSwap(): SWAP $I $SWAP_DEVICE is a zram device"
 				continue
-			elif [ "$SWAP_SIZE" -lt "$SIZE_NEEDED" ]; then
+			elif [ $(( SWAP_SIZE +0 )) -lt "$SIZE_NEEDED" ]; then
 				echo "ensureDiskSwap(): SWAP $I $SWAP_DEVICE is too small: $( prettyKB $SWAP_SIZE ) < $( prettyKB $SIZE_NEEDED ))"
 				continue
-			elif [ "$SWAP_SIZE" -lt "$SELECTED_SIZE" ]; then
+			elif [ $(( SWAP_SIZE +0 )) -lt "$SELECTED_SIZE" ]; then
 				echo "ensureDiskSwap(): SWAP $I $SWAP_DEVICE is too small: $( prettyKB $SWAP_SIZE ) < $( prettyKB $SELECTED_SIZE ))"
 				continue
 			else
