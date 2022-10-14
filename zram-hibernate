@@ -219,8 +219,11 @@ getMemInfo() {
 
 getCalculatedInfo() {
 	# Ensure essential information is present
-	if [ -z "$SwapTotal" ] || [ $(( SwapTotal +0 )) -lt 1 ]; then
+	if [ -z "$SwapTotal" ]; then
 		echo "FATAL: Unable to determine SwapTotal" >&2
+		return 1
+	elif [ $(( SwapTotal +0 )) -lt 1 ] && [ "$SwapTotal" != "0" ]; then
+		echo "FATAL: SwapTotal is invalid: $SwapTotal" >&2
 		return 1
 	fi
 	# Ensure SwapUsed is defined
