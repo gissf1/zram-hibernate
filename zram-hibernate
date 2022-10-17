@@ -1024,7 +1024,8 @@ doHibernate() {
 		exit 1
 	fi
 	# try to run systemctl subcommand (or dryrun)
-	CMD="$SYSTEMCTL $CMD"
+	local SUBCMD="$CMD"
+	CMD="$SYSTEMCTL $SUBCMD"
 	if [[ $TEST != 0 ]]; then
 		echo "TEST: would execute: $CMD"
 		RET=0
@@ -1033,11 +1034,22 @@ doHibernate() {
 		RET=0
 	else
 		isVerbose 2 && echo "doHibernate(): executing: $CMD"
-		# TODO: uncomment the next line after testing pre/post code is done
-		#$CMD
+		$CMD
 		RET=$?
 		if [ $RET != 0 ] || isVerbose 2 ; then
 			echo "doHibernate(): back from: $CMD (exit code=$RET)"
+		fi
+		if [ $RET == 0 ]; then
+			echo "doHibernate(): sleeping until hibernation activates..."
+			while ! $SYSTEMCTL is-active -q "systemd-$SUBCMD" ; do
+				sleep 0.5
+			done
+			# sleep until system hibernation returns
+			sleep 2
+			while $SYSTEMCTL is-active -q "systemd-$SUBCMD" ; do
+				sleep 2
+			done
+			echo "doHibernate(): awake after hibernation"
 		fi
 	fi
 	return $RET
