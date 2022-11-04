@@ -1036,6 +1036,7 @@ doHibernate() {
 		RET=0
 	else
 		isVerbose 2 && echo "doHibernate(): executing: $CMD"
+		local PRESECS=$SECONDS
 		$CMD
 		RET=$?
 		if [ $RET != 0 ] || isVerbose 2 ; then
@@ -1043,14 +1044,24 @@ doHibernate() {
 		fi
 		if [ $RET == 0 ]; then
 			echo "doHibernate(): sleeping until hibernation activates..."
-			while ! $SYSTEMCTL is-active -q "systemd-$SUBCMD" ; do
+			local SHOWTIMEOUT=$( isVerbose 2 && echo -n 1 )
+			while [ $(( SECONDS - PRESECS )) -lt 60 ] \
+			&& ! $SYSTEMCTL is-active "systemd-$SUBCMD" | grep -qvE '^inactive$' ; do
 				sleep 0.5
+				if [ "$SHOWTIMEOUT" == "1" ]; then
+					echo -en "timeout in $(( 60 + PRESECS - SECONDS )) sec...  \r"
+				elif [ $(( SECONDS - PRESECS )) -gt 20 ]; then
+					SHOWTIMEOUT=1
+				fi
 			done
+			clearline
 			# sleep until system hibernation returns
 			sleep 2
 			while $SYSTEMCTL is-active -q "systemd-$SUBCMD" ; do
 				sleep 2
+				echo -n "!"
 			done
+			clearline
 			echo "doHibernate(): awake after hibernation"
 		fi
 	fi
