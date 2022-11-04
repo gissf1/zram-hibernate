@@ -979,12 +979,14 @@ ensureDiskSwap() {
 		fi
 	done
 	
+	if [ -n "$REMOVE_SWAPS" ]; then
 	isVerbose 1 && echo "ensureDiskSwap(): Preparing to remove SWAP entries..."
-	if [[ $DRYRUN == 0 ]]; then
-		isVerbose 2 && echo "ensureDiskSwap(): executing: doSwapRemoval $REMOVE_SWAPS"
-		doSwapRemoval $REMOVE_SWAPS || return $?
-	else
-		echo "ensureDiskSwap(): DRYRUN: would call: doSwapRemoval $REMOVE_SWAPS"
+		if [[ $DRYRUN == 0 ]]; then
+			isVerbose 2 && echo "ensureDiskSwap(): executing: doSwapRemoval $REMOVE_SWAPS"
+			doSwapRemoval $REMOVE_SWAPS || return $?
+		else
+			echo "ensureDiskSwap(): DRYRUN: would call: doSwapRemoval $REMOVE_SWAPS"
+		fi
 	fi
 	
 	getVars || return $?
