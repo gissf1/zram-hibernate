@@ -1282,8 +1282,14 @@ while [[ $# -gt 0 ]]; do
 				;;
 			pre)  PRE=1  ;;
 			post) POST=1 ;;
-			suspend|hibernate|hybrid-sleep|suspend-then-hibernate)
+			suspend|hibernate|hybrid-sleep)
 				ACTION=$ARG
+				;;
+			suspend-then-hibernate)
+				ACTION=$ARG
+				if [ -n "$SYSTEMD_SLEEP_ACTION" ]; then
+					ACTION=$SYSTEMD_SLEEP_ACTION
+				fi
 				;;
 			# unknown commands
 			-*)
@@ -1321,6 +1327,10 @@ elif [[ $DEBUG != 0 ]]; then
 elif [ "$ACTION" == "suspend" ]; then
 	echo "Nothing to do: No swap needed for pure suspend"
 elif [[ $PRE != 0 ]]; then
+	if [ "$ACTION" == "suspend-after-failed-hibernate" ]; then
+		echo "Nothing to do: No swap needed for suspend-after-failed-hibernate"
+		exit 0
+	fi
 	pre_main
 elif [[ $POST != 0 ]]; then
 	post_main
